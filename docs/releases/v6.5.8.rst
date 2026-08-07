@@ -16,7 +16,8 @@ Security fixes
   reporting this issue.
 - The deprecated mixed-case arguments to `.RequestHandler.set_cookie` now enforce the same
   restrictions on invalid characters that were introduced in Tornado 6.5.5 for the standard
-  lowercase arguments. Thanks to `sec-reex <https://github.com/sec-reex>`_ for reporting this issue.
+  lowercase arguments. Thanks to `sec-reex <https://github.com/sec-reex>`_ and
+  `Arpit Jain <https://github.com/arpitjain099>`_ for reporting this issue.
 
 Deprecations
 ~~~~~~~~~~~~
