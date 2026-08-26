@@ -67,6 +67,10 @@ except ImportError:
     pass
 
 
+# To be used with str.strip() and related methods.
+HTTP_WHITESPACE = " \t"
+
+
 # RFC 7230 section 3.5: a recipient MAY recognize a single LF as a line
 # terminator and ignore any preceding CR.
 _CRLF_RE = re.compile(r'\r?\n')
@@ -176,18 +180,33 @@ class HTTPHeaders(collections.MutableMapping):
                 yield (name, value)
 
     def parse_line(self, line):
-        """Updates the dictionary with a single header line.
+        r"""Updates the dictionary with a single header line.
 
         >>> h = HTTPHeaders()
         >>> h.parse_line("Content-Type: text/html")
         >>> h.get('content-type')
         'text/html'
+        >>> h.parse_line("Content-Length: 42\r\n")
+        >>> h.get('content-type')
+        'text/html'
+
+        Lines may be passed with or without the trailing CRLF, making it
+        possible to pass lines from `.AsyncHTTPClient`'s ``header_callback``
+        directly to this method.
         """
+        m = re.search(r'\r?\n$', line)
+        if m:
+            # RFC 7230 section 3.5: a recipient MAY recognize a single LF as a
+            # line terminator and ignore any preceding CR.
+            line = line[:m.start()]
+        if not line:
+            # Empty line, or the final CRLF of a header block.
+            return
         if line[0].isspace():
             # continuation of a multi-line header
             if self._last_key is None:
                 raise HTTPInputError("first header line cannot start with whitespace")
-            new_part = ' ' + line.lstrip()
+            new_part = ' ' + line.strip(HTTP_WHITESPACE)
             self._as_list[self._last_key][-1] += new_part
             self._dict[self._last_key] += new_part
         else:
@@ -195,7 +214,7 @@ class HTTPHeaders(collections.MutableMapping):
                 name, value = line.split(":", 1)
             except ValueError:
                 raise HTTPInputError("no colon in header line")
-            self.add(name, value.strip())
+            self.add(name, value.strip(HTTP_WHITESPACE))
 
     @classmethod
     def parse(cls, headers):
@@ -212,9 +231,16 @@ class HTTPHeaders(collections.MutableMapping):
 
         """
         h = cls()
-        for line in _CRLF_RE.split(headers):
-            if line:
-                h.parse_line(line)
+
+        start = 0
+        while True:
+            lf = headers.find("\n", start)
+            if lf == -1:
+                h.parse_line(headers[start:])
+                break
+            line = headers[start:lf + 1]
+            start = lf + 1
+            h.parse_line(line)
         return h
 
     # MutableMapping abstract method implementations.

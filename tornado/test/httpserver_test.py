@@ -510,6 +510,57 @@ Transfer-Encoding: chunked
             self.assertEqual(400, start_line.code)
             self.assertEqual('Bad Request', start_line.reason)
 
+    def test_chunked_request_body_duplicate_header(self):
+        # Repeated Transfer-Encoding headers should be an error (and not confuse
+        # the chunked-encoding detection to mess up framing).
+        with ExpectLog(gen_log, '.*Unsupported Transfer-Encoding chunked,chunked'):
+            self.stream.write(b"""\
+POST /echo HTTP/1.1
+Transfer-Encoding: chunked
+Transfer-encoding: chunked
+
+2
+ok
+0
+
+""".replace(b"\n", b"\r\n"))
+            read_stream_body(self.stream, self.stop)
+            start_line, headers, response = self.wait()
+            self.assertEqual(400, start_line.code)
+
+    def test_chunked_request_body_unsupported_transfer_encoding(self):
+        # We don't support transfer-encodings other than chunked.
+        with ExpectLog(gen_log, '.*Unsupported Transfer-Encoding gzip, chunked'):
+            self.stream.write(b"""\
+POST /echo HTTP/1.1
+Transfer-Encoding: gzip, chunked
+
+2
+ok
+0
+
+""".replace(b"\n", b"\r\n"))
+            read_stream_body(self.stream, self.stop)
+            start_line, headers, response = self.wait()
+            self.assertEqual(400, start_line.code)
+
+    def test_chunked_request_body_transfer_encoding_and_content_length(self):
+        # Transfer-encoding and content-length are mutually exclusive
+        with ExpectLog(gen_log, '.*Message with both Transfer-Encoding and Content-Length'):
+            self.stream.write(b"""\
+POST /echo HTTP/1.1
+Transfer-Encoding: chunked
+Content-Length: 2
+
+2
+ok
+0
+
+""".replace(b"\n", b"\r\n"))
+            read_stream_body(self.stream, self.stop)
+            start_line, headers, response = self.wait()
+            self.assertEqual(400, start_line.code)
+
     def test_invalid_content_length_1(self):
         with ExpectLog(gen_log, '.*Only integer Content-Length is allowed'):
             self.stream.write(b"""\
@@ -1038,6 +1089,36 @@ class StreamingChunkSizeTest(AsyncHTTPTestCase):
             write(compressed[20:])
         self.fetch_chunk_sizes(body_producer=body_producer,
                                headers={'Content-Encoding': 'gzip'})
+
+
+class TransferEncodingOutputTest(AsyncHTTPTestCase):
+    # An application that sets Transfer-Encoding itself must not be able to
+    # take over the framing of the response: we chunk our own output whenever
+    # there is no Content-Length, so the body always matches the encoding we
+    # advertise. Leaving the application's header alone used to send an
+    # unchunked body under a "Transfer-Encoding: chunked" header, which is a
+    # response-smuggling vector against any proxy in front of us.
+    class Handler(RequestHandler):
+        def get(self):
+            self.set_header('Transfer-Encoding', 'chunked')
+            self.write('Hello world')
+            # Flush so the headers go out before finish() would add a
+            # Content-Length.
+            self.flush()
+
+    def get_app(self):
+        return Application([('/', TransferEncodingOutputTest.Handler)])
+
+    def get_http_client(self):
+        # Read the framing ourselves rather than relying on libcurl.
+        return SimpleAsyncHTTPClient()
+
+    def test_application_set_transfer_encoding(self):
+        response = self.fetch('/')
+        response.rethrow()
+        self.assertEqual('chunked', response.headers['Transfer-Encoding'])
+        self.assertNotIn('Content-Length', response.headers)
+        self.assertEqual(b'Hello world', response.body)
 
 
 class InvalidOutputContentLengthTest(AsyncHTTPTestCase):
