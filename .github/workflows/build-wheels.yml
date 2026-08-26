@@ -1,0 +1,123 @@
+name: Build Windows Wheels
+
+on:
+  workflow_dispatch:  # Allow manual triggers
+
+jobs:
+  build-windows-wheels:
+    name: Build tornado-5.1.1 - Python ${{ matrix.python-version }} (${{ matrix.arch-name }})
+    runs-on: windows-2022
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Python 3.5 - 32-bit and 64-bit
+          - python-version: '3.5'
+            arch: 'x86'
+            arch-name: 'win32'
+            vcvars-arch: 'x86'
+          - python-version: '3.5'
+            arch: 'x64'
+            arch-name: 'win_amd64'
+            vcvars-arch: 'amd64'
+
+          # Python 3.6 - 32-bit and 64-bit
+          - python-version: '3.6'
+            arch: 'x86'
+            arch-name: 'win32'
+            vcvars-arch: 'x86'
+          - python-version: '3.6'
+            arch: 'x64'
+            arch-name: 'win_amd64'
+            vcvars-arch: 'amd64'
+
+          # Python 3.7 - 32-bit and 64-bit
+          - python-version: '3.7'
+            arch: 'x86'
+            arch-name: 'win32'
+            vcvars-arch: 'x86'
+          - python-version: '3.7'
+            arch: 'x64'
+            arch-name: 'win_amd64'
+            vcvars-arch: 'amd64'
+
+    env:
+      TORNADO_EXTENSION: "1"
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python ${{ matrix.python-version }} (${{ matrix.arch }})
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        architecture: ${{ matrix.arch }}
+
+    - name: Display Python version and architecture
+      run: |
+        python --version
+        python -c "import struct; print('Architecture:', struct.calcsize('P') * 8, 'bit')"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --index-url https://:2018-09-16T19:22:58.819187Z@time-machines-pypi.sealsecurity.io/ --disable-pip-version-check --user --upgrade pip
+        python -m pip install --index-url https://:2018-09-16T19:22:58.819187Z@time-machines-pypi.sealsecurity.io/ tox wheel
+
+    # windows-2022 ships only the v142/v143 toolsets; the v140 one the published
+    # wheels were compiled with has to be added to the existing VS install first.
+    - name: Install MSVC v140 (VS2015) toolset
+      shell: pwsh
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vsPath = & $vswhere -latest -products * -property installationPath
+        $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+        $p = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
+          'modify', '--installPath', "`"$vsPath`"",
+          '--add', 'Microsoft.VisualStudio.Component.VC.140',
+          '--quiet', '--norestart', '--nocache')
+        Write-Host "installer exit code: $($p.ExitCode)"
+        if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { exit 1 }
+        $v140 = "${env:ProgramFiles(x86)}\Microsoft Visual Studio 14.0\VC\bin\cl.exe"
+        if (-not (Test-Path $v140)) { Write-Host "v140 cl.exe missing"; exit 1 }
+
+    - name: Build wheel
+      shell: cmd
+      run: |
+        for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do set VS_PATH=%%i
+        rem The published speedups.pyd resolves memcpy/memset out of VCRUNTIME140.dll,
+        rem which only the VS2015 (14.0) toolset does; v142/v143 take them from the UCRT
+        rem api-ms-win-crt-string/heap forwarders instead. cl 14.0 cannot parse the ucrt
+        rem headers of the runner's newest SDK (C2440 on __m128i in wchar.h), so pin the
+        rem 2018-era 10.0.17763.0 SDK that ships on the image alongside it.
+        call "%VS_PATH%\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.vcvars-arch }} 10.0.17763.0 -vcvars_ver=14.0
+        if errorlevel 1 exit /b 1
+        cl 2>&1 | findstr /C:"Version"
+        set DISTUTILS_USE_SDK=1
+        set MSSdk=1
+        rem DISTUTILS_USE_SDK makes distutils._msvccompiler take the env verbatim, so it
+        rem never discovers a vcruntime redist and falls back to /MT + "/nodefaultlib:
+        rem libucrt.lib ucrt.lib" -- a statically linked vcruntime, which is why the pyd
+        rem imported calloc/free from api-ms-win-crt-heap instead of VCRUNTIME140.dll.
+        rem Pointing py_vcruntime_redist at any real vcruntime140.dll restores the /MD
+        rem dynamic link the published wheels used; the file itself is never linked, and
+        rem _msvccompiler._BUNDLED_DLLS keeps it from being copied into the wheel.
+        set py_vcruntime_redist=%SystemRoot%\System32\vcruntime140.dll
+        if not exist "%py_vcruntime_redist%" set py_vcruntime_redist=%SystemRoot%\SysWOW64\vcruntime140.dll
+        if not exist "%py_vcruntime_redist%" ( echo no vcruntime140.dll on this runner & exit /b 1 )
+        python setup.py bdist_wheel
+
+    - name: List built wheels
+      run: |
+        dir dist\
+
+    - name: Verify wheel name
+      run: |
+        python -c "import os; files = os.listdir('dist'); print('Built:', files[0] if files else 'No files'); pyver = '${{ matrix.python-version }}'.replace('.', ''); expected = 'tornado-5.1.1-cp' + pyver + 'm-cp' + pyver + 'm-${{ matrix.arch-name }}.whl'; print('Expected: ' + expected)"
+
+    - name: Upload wheels as artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: tornado-windows-wheels-py${{ matrix.python-version }}-${{ matrix.arch-name }}
+        path: dist/*.whl
+        if-no-files-found: error
